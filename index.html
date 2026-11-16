@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BeensMe — Deteksi Tingkat Kematangan Biji Kopi (YOLOv8)</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+    <style>
+      :root {
+        --bg: #f6f3ee;
+        --card: #ffffff;
+        --primary: #4e342e;
+        --accent: #8d6e63;
+        --text: #2c221e;
+        --border: #e0d6cc;
+      }
+      * {
+        box-sizing: border-box;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .container {
+        max-width: 960px;
+        width: 100%;
+      }
+      header {
+        text-align: center;
+        margin-bottom: 24px;
+      }
+      header h1 {
+        margin: 0;
+        color: var(--primary);
+        font-size: 2rem;
+      }
+      header p {
+        margin: 6px 0 0;
+        color: #6d5d56;
+      }
+      .status-bar {
+        background: #efe7de;
+        border: 1px solid var(--border);
+        padding: 10px 16px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        text-align: center;
+        font-weight: 600;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.5fr 1fr;
+        gap: 20px;
+      }
+      @media (max-width: 768px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+      }
+      .upload-box {
+        display: block;
+        border: 2px dashed var(--accent);
+        border-radius: 12px;
+        padding: 24px;
+        text-align: center;
+        cursor: pointer;
+        background: #faf8f5;
+        transition: 0.2s;
+      }
+      .upload-box:hover {
+        background: #f2ece4;
+      }
+      input[type="file"] {
+        display: none;
+      }
+      .canvas-wrap {
+        margin-top: 16px;
+        text-align: center;
+        background: #1e1e1e;
+        border-radius: 10px;
+        overflow: hidden;
+        min-height: 260px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      canvas {
+        max-width: 100%;
+        height: auto;
+        display: block;
+      }
+      .controls {
+        margin-top: 14px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .controls input[type="range"] {
+        flex: 1;
+        accent-color: var(--primary);
+      }
+      .badge-list {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 0;
+      }
+      .badge-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .badge-item:last-child {
+        border-bottom: none;
+      }
+      .dot {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        margin-right: 8px;
+      }
+      .count {
+        background: var(--primary);
+        color: #fff;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-weight: 700;
+        font-size: 0.9rem;
+      }
+      .summary-box {
+        margin-top: 16px;
+        padding: 14px;
+        border-radius: 10px;
+        background: #f5efe8;
+        border-left: 4px solid var(--primary);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>☕ BeensMe AI</h1>
+        <p>Deteksi Otomatis Tingkat Kematangan Biji Kopi Berbasis YOLOv8</p>
+      </header>
+
+      <div id="status" class="status-bar">
+        ⏳ Memuat model AI (best.onnx)...
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <label class="upload-box" for="imageInput">
+            <strong>Klik untuk memilih foto biji kopi</strong><br />
+            <small>Mendukung format JPG, PNG, atau WEBP</small>
+            <input type="file" id="imageInput" accept="image/*" disabled />
+          </label>
+
+          <div class="controls">
+            <label for="confSlider"
+              >Threshold Keyakinan: <strong id="confVal">40%</strong></label
+            >
+            <input type="range" id="confSlider" min="15" max="90" value="40" />
+          </div>
+
+          <div class="canvas-wrap">
+            <canvas id="canvas"></canvas>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top: 0; color: var(--primary)">
+            Hasil Klasifikasi & Hitungan
+          </h3>
+          <ul class="badge-list" id="resultList"></ul>
+          <div class="summary-box" id="summaryBox">
+            Unggah gambar biji kopi untuk melihat analisis kematangan.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const MODEL_PATH = "./model/best.onnx";
+      const INPUT_SIZE = 640;
+
+      // Urutan kelas sesuai Confusion Matrix
+      const CLASSES = [
+        {
+          key: "diseased",
+          label: "Terserang Penyakit (Diseased)",
+          color: "#8e24aa",
+        },
+        { key: "dry", label: "Kering (Dry)", color: "#6d4c41" },
+        {
+          key: "overripe",
+          label: "Terlalu Matang (Overripe)",
+          color: "#d81b60",
+        },
+        { key: "ripe", label: "Matang (Ripe)", color: "#2e7d32" },
+        {
+          key: "semi_ripe",
+          label: "Setengah Matang (Semi-Ripe)",
+          color: "#f57c00",
+        },
+        { key: "unripe", label: "Belum Matang (Unripe)", color: "#1565c0" },
+      ];
+
+      let session = null;
+      let currentImg = null;
+      const statusEl = document.getElementById("status");
+      const fileInput = document.getElementById("imageInput");
+      const confSlider = document.getElementById("confSlider");
+      const confVal = document.getElementById("confVal");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+
+      // Inisialisasi daftar kelas di UI
+      function renderCounts(counts = {}) {
+        const list = document.getElementById("resultList");
+        list.innerHTML = CLASSES.map(
+          (c) => `
+        <li class="badge-item">
+          <span><span class="dot" style="background:${c.color}"></span>${c.label}</span>
+          <span class="count">${counts[c.key] || 0}</span>
+        </li>
+      `,
+        ).join("");
+      }
+      renderCounts();
+
+      // Muat model ONNX
+      async function initModel() {
+        try {
+          session = await ort.InferenceSession.create(MODEL_PATH, {
+            executionProviders: ["wasm"],
+          });
+          statusEl.textContent =
+            "✅ Model AI siap digunakan! Silakan unggah gambar biji kopi.";
+          statusEl.style.background = "#e8f5e9";
+          fileInput.disabled = false;
+        } catch (err) {
+          statusEl.textContent =
+            "❌ Gagal memuat ./model/best.onnx — pastikan nama file & folder sesuai.";
+          statusEl.style.background = "#ffebee";
+          console.error(err);
+        }
+      }
+      initModel();
+
+      confSlider.addEventListener("input", () => {
+        confVal.textContent = confSlider.value + "%";
+        if (currentImg) detectImage(currentImg);
+      });
+
+      fileInput.addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const img = new Image();
+        img.onload = () => {
+          currentImg = img;
+          detectImage(img);
+        };
+        img.src = URL.createObjectURL(file);
+      });
+
+      // Preprocessing Letterbox 640x640 -> Tensor NCHW
+      function preprocess(img) {
+        const off = document.createElement("canvas");
+        off.width = INPUT_SIZE;
+        off.height = INPUT_SIZE;
+        const octx = off.getContext("2d");
+
+        const scale = Math.min(INPUT_SIZE / img.width, INPUT_SIZE / img.height);
+        const nw = Math.round(img.width * scale);
+        const nh = Math.round(img.height * scale);
+        const padX = Math.floor((INPUT_SIZE - nw) / 2);
+        const padY = Math.floor((INPUT_SIZE - nh) / 2);
+
+        octx.fillStyle = "#727272";
+        octx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+        octx.drawImage(img, padX, padY, nw, nh);
+
+        const { data } = octx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+        const floatData = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+        const area = INPUT_SIZE * INPUT_SIZE;
+
+        for (let i = 0; i < area; i++) {
+          floatData[i] = data[i * 4] / 255.0; // R
+          floatData[i + area] = data[i * 4 + 1] / 255.0; // G
+          floatData[i + 2 * area] = data[i * 4 + 2] / 255.0; // B
+        }
+        return {
+          tensor: new ort.Tensor("float32", floatData, [
+            1,
+            3,
+            INPUT_SIZE,
+            INPUT_SIZE,
+          ]),
+          scale,
+          padX,
+          padY,
+        };
+      }
+
+      // Non-Maximum Suppression (NMS)
+      function iou(a, b) {
+        const x1 = Math.max(a.x1, b.x1),
+          y1 = Math.max(a.y1, b.y1);
+        const x2 = Math.min(a.x2, b.x2),
+          y2 = Math.min(a.y2, b.y2);
+        const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+        const union =
+          (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter;
+        return union > 0 ? inter / union : 0;
+      }
+
+      function nms(boxes, iouThresh = 0.45) {
+        boxes.sort((a, b) => b.score - a.score);
+        const picked = [];
+        while (boxes.length) {
+          const best = boxes.shift();
+          picked.push(best);
+          boxes = boxes.filter(
+            (b) => b.classId !== best.classId || iou(best, b) < iouThresh,
+          );
+        }
+        return picked;
+      }
+
+      async function detectImage(img) {
+        statusEl.textContent = "🔍 Menganalisis gambar biji kopi...";
+        const confThresh = parseInt(confSlider.value, 10) / 100;
+        const { tensor, scale, padX, padY } = preprocess(img);
+
+        const feeds = {};
+        feeds[session.inputNames[0]] = tensor;
+        const results = await session.run(feeds);
+        const output = results[session.outputNames[0]]; // [1, 10, 8400]
+        const data = output.data;
+        const numChannels = output.dims[1]; // 4 + 6 = 10
+        const numBoxes = output.dims[2]; // 8400
+
+        const rawBoxes = [];
+        for (let i = 0; i < numBoxes; i++) {
+          let maxScore = 0,
+            classId = -1;
+          for (let c = 0; c < CLASSES.length; c++) {
+            const score = data[(4 + c) * numBoxes + i];
+            if (score > maxScore) {
+              maxScore = score;
+              classId = c;
+            }
+          }
+          if (maxScore >= confThresh) {
+            const cx = data[0 * numBoxes + i];
+            const cy = data[1 * numBoxes + i];
+            const w = data[2 * numBoxes + i];
+            const h = data[3 * numBoxes + i];
+
+            const x1 = Math.max(0, (cx - w / 2 - padX) / scale);
+            const y1 = Math.max(0, (cy - h / 2 - padY) / scale);
+            const x2 = Math.min(img.width, (cx + w / 2 - padX) / scale);
+            const y2 = Math.min(img.height, (cy + h / 2 - padY) / scale);
+            rawBoxes.push({ x1, y1, x2, y2, score: maxScore, classId });
+          }
+        }
+
+        const finalBoxes = nms(rawBoxes);
+
+        // Gambar hasil di kanvas
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+
+        const counts = {};
+        const lineWidth = Math.max(2, Math.round(img.width / 250));
+        const fontSize = Math.max(13, Math.round(img.width / 45));
+        ctx.font = `bold ${fontSize}px sans-serif`;
+
+        finalBoxes.forEach((b) => {
+          const cls = CLASSES[b.classId];
+          counts[cls.key] = (counts[cls.key] || 0) + 1;
+
+          ctx.strokeStyle = cls.color;
+          ctx.lineWidth = lineWidth;
+          ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+
+          const label = `${cls.key} ${(b.score * 100).toFixed(0)}%`;
+          const textW = ctx.measureText(label).width;
+          ctx.fillStyle = cls.color;
+          ctx.fillRect(
+            b.x1,
+            Math.max(0, b.y1 - fontSize - 6),
+            textW + 10,
+            fontSize + 6,
+          );
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(label, b.x1 + 5, Math.max(fontSize, b.y1 - 4));
+        });
+
+        renderCounts(counts);
+        const summaryBox = document.getElementById("summaryBox");
+        if (finalBoxes.length === 0) {
+          summaryBox.innerHTML =
+            "Tidak ada biji kopi terdeteksi. Coba turunkan <em>Threshold Keyakinan</em> atau gunakan foto yang lebih jelas.";
+        } else {
+          const dominant = Object.entries(counts).sort(
+            (a, b) => b[1] - a[1],
+          )[0];
+          const domLabel = CLASSES.find((c) => c.key === dominant[0]).label;
+          summaryBox.innerHTML = `Total terdeteksi: <strong>${finalBoxes.length} biji kopi</strong>.<br/>Dominasi kondisi: <strong>${domLabel}</strong> (${dominant[1]} biji).`;
+        }
+        statusEl.textContent = `✅ Selesai! Terdeteksi ${finalBoxes.length} objek biji kopi.`;
+      }
+    </script>
+  </body>
+</html>
